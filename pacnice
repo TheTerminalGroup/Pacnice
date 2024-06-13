@@ -1,0 +1,238 @@
+#!/bin/bash
+
+#set -x
+
+VERSION=0.1
+
+case "$1" in
+install)	case "$2" in
+		--explicit)	pacman --color always -D --asexplicit "$3" ;;
+		*)		pacman --color always -S "$2" ;;
+		esac ;;
+
+update-all)	echo ':: Updating packages...'
+		pacman --color always -Syu
+		echo ':: Updating file information of packages...'
+		pacman --color always -Fy ;;
+
+remove)		pacman --color always -R "$2" ;;
+
+search)		pacman --color always -Ss "$2" ;;
+
+list)		arg=(-Q -q)
+		shift
+		for i; do
+			case "$i" in
+			--explicit)	arg+=(-e) ;;
+			--version)	arg[1]='' ;;
+			esac
+		done
+		pacman --color always ${arg[*]} ;;
+
+owns)		case "$2" in
+		--directory)	p="${3%/}"
+				arg=(" ${p#/}/.*$") ;;
+		--command)	arg=(" .*/bin/$3$") ;;
+		--library)	arg=(-e " .*/lib$3\.so[0-9.]*$" -e " .*/lib$3[-0-9.]*\.a$") ;;
+		--header)	arg=(" .*/$3\.h$") ;;
+		*)		arg=(" ${2#/}$") ;;
+		esac
+		matchfile=$(mktemp)
+		infofile=$(mktemp)
+		pacman --color never -Fl | grep "${arg[@]}" > "$matchfile"
+		case "$2" in
+		--directory)	tmp_matchfile=$(mktemp)
+				awk '
+					$1 != curpkg {
+						if (waitpath != "") {
+							printf "%s %s\n", curpkg, waitpath
+							waitpath = ""
+						}
+						curpkg = $1
+					}
+					{
+						path = $2
+						if (waitpath != "") {
+							if (substr(path, 1, length(waitpath)) != waitpath)
+								printf "%s %s\n", curpkg, waitpath
+							waitpath = ""
+						}
+						if (substr(path, length(path), 1) != "/")
+							printf "%s %s\n", curpkg, path
+						else
+							waitpath = path
+					}
+					END {
+						if (waitpath != "")
+							printf "%s %s\n", curpkg, waitpath
+					}
+				' < "$matchfile" > "$tmp_matchfile"
+				mv "$tmp_matchfile" "$matchfile" ;;
+		esac
+		pacman --color never -Sl | grep -F -f <(
+			while read line; do
+				echo " ${line% *} "
+			done < "$matchfile" | uniq
+		) > "$infofile"
+		cat "$infofile" "$matchfile" | awk '
+			NF > 2 {
+				repo[$2] = $1
+				version[$2] = $3
+				installed[$2] = $4
+			}
+			NF == 2 && $1 != curpkg {
+				curpkg = $1
+				if (installed[curpkg] != "")
+					printf "%s/%s %s %s\n", repo[curpkg], curpkg, version[curpkg], installed[curpkg]
+				else
+					printf "%s/%s %s\n", repo[curpkg], curpkg, version[curpkg]
+			}
+			NF == 2 { printf "    /%s\n", $2 }
+		'
+		rm "$matchfile" "$infofile" ;;
+
+provides)	shift
+		arg=()
+		for i; do
+			case "$i" in
+			--no-docs)	arg+=(-e /usr/share/man/ -e /usr/share/info/ -e /usr/share/doc/) ;;
+			--no-locale)	arg+=(-e /usr/share/locale/) ;;
+			*)		break ;;
+			esac
+		done
+		out=$(pacman --color never -Fl "$i" | awk '
+			{
+				path = "/" $2
+				if (waitpath != "") {
+					if (substr(path, 1, length(waitpath)) != waitpath)
+						print waitpath
+					waitpath = ""
+				}
+				if (substr(path, length(path), 1) != "/")
+					print path
+				else
+					waitpath = path
+			}
+			END {
+				if (waitpath != "")
+					print waitpath
+			}
+		')
+		if [[ "${#arg}" -gt 0 ]]; then
+			grep -v "${arg[@]}" <<<"$out"
+		else
+			echo "$out"
+		fi ;;
+
+info)		{ pacman --color never -Sii "$2"; pacman --color never -Qii "$2" 2> /dev/null; } | awk '
+			BEGIN { mode = "s" }
+			mode == "s" && $1 == "Repository"
+			mode == "s" && $1 == "Name"
+			mode == "s" && $1 == "Version"
+			mode == "s" && $1 == "Description"
+			mode == "s" && $1 == "Architecture"
+			mode == "s" && $1 == "URL"
+			mode == "s" && $1 == "Licenses"
+			mode == "s" && $1 == "Groups"
+			mode == "s" && $1 == "Provides"
+			mode == "s" && $1 == "Conflicts" && $2 == "With"
+			mode == "s" && $1 == "Replaces"
+			mode == "s" && $1 == "Download" && $2 == "Size"
+			mode == "s" && $1 == "Installed" && $2 == "Size"
+			mode == "s" && $1 == "Packager"
+			mode == "s" && $1 == "Build" && $2 == "Date"
+			mode == "s" && $1 == "MD5" && $2 == "Sum" { md5 = $0 }
+			mode == "s" && $1 == "SHA-256" && $2 == "Sum" { sha = $0 }
+			mode == "s" && $1 == "Signatures" { sig = $0 }
+			mode == "s" && $0 == "" { mode = "q" }
+			mode == "q" && $1 == "Install" && $2 == "Date"
+			mode == "q" && $1 == "Install" && $2 == "Reason"
+			mode == "q" && $1 == "Install" && $2 == "Script"
+			mode == "q" && $1 == "Validated" && $2 == "By"
+			mode == "q" && $1 == "Backup" && $2 == "Files" {
+				printf "%s ", $0
+				mode = "b"
+			}
+			mode == "b" && $1 == "(none)" { print "None" }
+			mode == "b" && NF == 2 {
+				cnt += 1
+				if (cnt > 1)
+					printf "                  "
+				printf "%s [%s]\n", $2, tolower($1)
+			}
+			END {
+				print md5
+				print sha
+				print sig
+			}
+		' ;;
+
+deptree)	case "$2" in
+		--reverse)	out=$(pacman --color never -Qi "$3") ;;
+		--reverse-all)	out=$(pacman --color never -Sii "$3") ;;
+		*)		out=$(pacman --color never -Si "$2") ;;
+		esac
+		case "$2" in
+		--reverse)	;&
+		--reverse-all)	awk '
+					$1 == "Required" && $2 == "By" {
+						if ($4 == "None")
+							next
+						for (i = 4; i <= NF; i++)
+							printf "+== %s\n", $i
+					}
+					$1 == "Optional" && $2 == "For" {
+						if ($4 == "None")
+							exit
+						for (i = 4; i <= NF; i++)
+							printf "+-- %s\n", $i
+					}
+					END { print "'"$3"'" }
+				' <<<"$out" ;;
+		*)		awk '
+					BEGIN {
+						print "'"$2"'"
+						maxlength = 0
+					}
+					$1 == "Depends" && $2 == "On" {
+						if ($4 == "None")
+							next
+						for (i = 4; i <= NF; i++) {
+							if ((l = length($i)) > maxlength)
+								maxlength = l
+							printf "+== %s\n", $i
+						}
+					}
+					$1 == "Conflicts" && $2 == "With" { exit }
+					cnt >= 1 {
+						cnt += 1
+						split($0, p, ":")
+						name[cnt] = substr(p[1], 19, length(p[1])-18)
+						reason[cnt] = substr(p[2], 2, length(p[2])-1)
+					}
+					$1 == "Optional" && $2 == "Deps" {
+						if ($4 == "None")
+							exit
+						cnt = 1
+						split($0, p, ":")
+						name[cnt] = substr(p[2], 2, length(p[2])-1)
+						reason[cnt] = substr(p[3], 2, length(p[3])-1)
+					}
+					cnt >= 1 {
+						if ((l = length(name[cnt])) > maxlength)
+							maxlength = l
+					}
+					END {
+						for (i = 1; i <= cnt; i++) {
+							printf "+-- %s", name[i]
+							if (reason[i] != "") {
+								for (j = length(name[i]); j < maxlength; j++)
+									printf " "
+								printf "   [%s]", reason[i]
+							}
+							printf "\n"
+						}
+					}
+				' <<<"$out" ;;
+		esac ;;
+esac
